@@ -156,6 +156,65 @@ operations:
     defaults:
       calendarId: primary
 
+  respond:
+    type: action
+    description: "RSVP to an event you were invited to: accept, decline or tentatively accept. Changes only YOUR response; the rest of the guest list is kept. The organizer is not emailed unless notify is true."
+    resource: events.patch
+    params:
+      calendarId:
+        type: string
+        description: "Calendar ID. Use the `calendars` operation to list available IDs; required for events on shared calendars. Defaults to 'primary' on the event operations (`list`, `get`, `create`, `quickAdd`, `update`, `delete`). On `agenda`, a calendar name or ID to filter to — OMIT it to span all calendars, and do not pass 'primary', which is an API alias rather than an id agenda matches on. On `freebusy`, a comma-separated list of calendar IDs to check IN ADDITION to your own."
+      eventId:
+        type: string
+        description: "Event ID"
+        required: true
+      response:
+        type: string
+        description: "Your answer to the invitation"
+        enum: [accepted, declined, tentative]
+        required: true
+      comment:
+        type: string
+        description: "Optional note to the organizer with your response"
+      notify:
+        type: boolean
+        description: "Email the organizer about your response (default: false)"
+    defaults:
+      calendarId: primary
+
+  suggestTime:
+    type: detail
+    description: "suggest meeting times when you and the given attendees are all free, inside working hours. Read-only: nothing is booked — use create with a suggested start. timeMin/timeMax default to now and 7 days later; attendees are the other people's emails (your own calendar is always included)."
+    resource: freebusy.query
+    params:
+      durationMinutes:
+        type: number
+        description: "Meeting length in minutes (default 30)"
+      attendees:
+        type: string
+        description: "Comma-separated email addresses. On `update`, whatever you pass REPLACES the existing list — addresses you leave out are removed, and an empty string clears everyone. OMIT the parameter to leave the attendee list untouched while changing other fields. On `freebusy`, the addresses whose availability to check."
+      timeMin:
+        type: string
+        description: "Start of range (ISO 8601). On `list`, defaults to today."
+      timeMax:
+        type: string
+        description: "End of range (ISO 8601)"
+      timeZone:
+        type: string
+        description: "IANA time zone for working hours, e.g. Europe/Zurich (default: your primary calendar's zone)"
+      workdayStart:
+        type: number
+        description: "First working hour, 0–23 (default 9)"
+      workdayEnd:
+        type: number
+        description: "Hour the working day ends, 1–24 (default 17)"
+      includeWeekends:
+        type: boolean
+        description: "Also suggest Saturday and Sunday slots (default false)"
+      maxSuggestions:
+        type: number
+        description: "How many slots to return (default 5, max 20)"
+
   delete:
     type: action
     description: "delete an event"

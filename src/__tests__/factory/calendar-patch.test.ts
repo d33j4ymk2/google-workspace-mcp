@@ -887,3 +887,84 @@ describe('calendarPatch', () => {
     });
   });
 });
+
+describe('respond', () => {
+  const handler = calendarPatch.customHandlers!.respond;
+  const event = () => ({
+    id: 'ev1', summary: 'Planning',
+    organizer: { email: 'boss@test.com' },
+    attendees: [
+      { email: 'boss@test.com', organizer: true, responseStatus: 'accepted' },
+      { email: 'alias@test.com', self: true, responseStatus: 'needsAction' },
+      { email: 'carol@test.com', responseStatus: 'needsAction' },
+    ],
+  });
+
+  beforeEach(() => mockCall.mockReset());
+
+  it('sets only your response and re-sends the whole guest list, without emailing by default', async () => {
+    mockCall.mockResolvedValueOnce(event()).mockResolvedValueOnce({});
+    const res = await handler({ eventId: 'ev1', response: 'accepted', comment: 'See you' }, 'user@test.com');
+
+    expect(mockCall).toHaveBeenLastCalledWith('calendar', 'events.patch', {
+      calendarId: 'primary', eventId: 'ev1', sendUpdates: 'none',
+      attendees: [
+        { email: 'boss@test.com', organizer: true, responseStatus: 'accepted' },
+        { email: 'alias@test.com', self: true, responseStatus: 'accepted', comment: 'See you' },
+        { email: 'carol@test.com', responseStatus: 'needsAction' },
+      ],
+    }, expect.objectContaining({ account: 'user@test.com' }));
+    expect(res.text).toContain('Accepted: Planning');
+    expect(res.refs.notified).toBe(false);
+  });
+
+  it('emails the organizer only when notify is true', async () => {
+    mockCall.mockResolvedValueOnce(event()).mockResolvedValueOnce({});
+    await handler({ eventId: 'ev1', response: 'declined', notify: true }, 'user@test.com');
+    expect(mockCall).toHaveBeenLastCalledWith('calendar', 'events.patch',
+      expect.objectContaining({ sendUpdates: 'all' }), expect.anything());
+  });
+
+  it('refuses an unknown response and an event you are not invited to', async () => {
+    await expect(handler({ eventId: 'ev1', response: 'maybe' }, 'user@test.com')).rejects.toThrow(/accepted, declined, tentative/);
+
+    mockCall.mockResolvedValueOnce({ id: 'ev2', summary: 'Mine', organizer: { self: true }, attendees: [] });
+    await expect(handler({ eventId: 'ev2', response: 'accepted' }, 'user@test.com')).rejects.toThrow(/You organize "Mine"/);
+    expect(mockCall).toHaveBeenCalledTimes(1); // nothing was patched
+  });
+});
+
+describe('suggestTime', () => {
+  const handler = calendarPatch.customHandlers!.suggestTime;
+  beforeEach(() => mockCall.mockReset());
+
+  it('queries free/busy for you plus attendees and flags calendars it cannot see', async () => {
+    mockCall.mockResolvedValueOnce({
+      calendars: {
+        'user@test.com': { busy: [{ start: '2026-10-21T07:00:00Z', end: '2026-10-21T08:00:00Z' }] },
+        'ext@other.com': { errors: [{ reason: 'notFound' }] },
+      },
+    });
+    const res = await handler({
+      attendees: 'ext@other.com', timeZone: 'Europe/Zurich', maxSuggestions: 1,
+      timeMin: '2026-10-21T06:00:00Z', timeMax: '2026-10-21T16:00:00Z',
+    }, 'user@test.com');
+
+    expect(mockCall).toHaveBeenCalledWith('calendar', 'freebusy.query', expect.objectContaining({
+      items: [{ id: 'user@test.com' }, { id: 'ext@other.com' }], timeZone: 'Europe/Zurich',
+    }), expect.anything());
+    expect(res.text).toContain('Wed 21 Oct, 10:00–10:30');
+    expect(res.text).toContain('ext@other.com');
+    expect(res.refs.noAccess).toEqual(['ext@other.com']);
+  });
+
+  it("uses the primary calendar's time zone when none is given", async () => {
+    mockCall
+      .mockResolvedValueOnce({ timeZone: 'America/New_York' })
+      .mockResolvedValueOnce({ calendars: { 'user@test.com': { busy: [] } } });
+    const res = await handler({ timeMin: '2026-10-21T12:00:00Z', timeMax: '2026-10-21T22:00:00Z', maxSuggestions: 1 }, 'user@test.com');
+    expect(mockCall).toHaveBeenNthCalledWith(1, 'calendar', 'calendars.get', { calendarId: 'primary' }, expect.anything());
+    expect(res.text).toContain('America/New_York');
+    expect(res.refs.slots).toEqual([{ start: '2026-10-21T13:00:00.000Z', end: '2026-10-21T13:30:00.000Z' }]);
+  });
+});

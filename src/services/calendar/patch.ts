@@ -15,6 +15,7 @@ import { call } from '../../google/client.js';
 import { formatEventList, formatEventDetail } from '../../server/formatting/markdown.js';
 import { requireString, optionalString } from '../../server/handlers/validate.js';
 import { allDayDate, exclusiveEndDate, allDayRange } from './dates.js';
+import { suggestSlots, formatSlot, type Interval } from './suggest.js';
 import type { ServicePatch, PatchContext } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -420,6 +421,116 @@ export const calendarPatch: ServicePatch = {
           `**Calendar:** ${calendarId}\n` +
           `**Event ID:** ${data.id ?? 'unknown'}`,
         refs: { id: data.id, eventId: data.id, calendarId, summary, start, end, allDay },
+      };
+    },
+
+    /**
+     * RSVP to an invitation: set YOUR attendee entry's response.
+     *
+     * events.patch replaces the attendees array wholesale, so the full list is read back
+     * and re-sent with only your entry changed — sending just yourself would uninvite
+     * everyone else. Your entry is the one Google flags `self`, which also finds you when
+     * you were invited through a secondary calendar or an alias.
+     *
+     * The organizer is NOT emailed unless `notify` is true; the response still shows on
+     * their calendar either way.
+     */
+    respond: async (params, account): Promise<HandlerResponse> => {
+      const eventId = requireString(params, 'eventId');
+      const calendarId = (params.calendarId as string) || 'primary';
+      const response = requireString(params, 'response');
+      const allowed = ['accepted', 'declined', 'tentative'];
+      if (!allowed.includes(response)) {
+        throw new Error(`response must be one of ${allowed.join(', ')} — got '${response}'.`);
+      }
+
+      const event = await call('calendar', 'events.get', { calendarId, eventId }, { account }) as Record<string, unknown>;
+      const attendees = (event.attendees ?? []) as Array<Record<string, unknown>>;
+      const me = attendees.find((a) => a.self === true)
+        ?? attendees.find((a) => String(a.email ?? '').toLowerCase() === account.toLowerCase());
+      if (!me) {
+        const organizer = (event.organizer as Record<string, unknown> | undefined)?.self === true;
+        throw new Error(organizer
+          ? `You organize "${String(event.summary ?? eventId)}", so there is no invitation to answer.`
+          : `You are not on the guest list of "${String(event.summary ?? eventId)}", so there is no invitation to answer.`);
+      }
+
+      me.responseStatus = response;
+      if (params.comment !== undefined) me.comment = String(params.comment);
+      const notify = params.notify === true || params.notify === 'true';
+
+      await call('calendar', 'events.patch', {
+        calendarId, eventId, attendees, sendUpdates: notify ? 'all' : 'none',
+      }, { account });
+
+      const word = { accepted: 'Accepted', declined: 'Declined', tentative: 'Tentatively accepted' }[response];
+      return {
+        text: `${word}: ${String(event.summary ?? eventId)}` +
+          (notify ? '\nThe organizer was notified by email.' : '\nThe organizer was not emailed; your response shows on their calendar.'),
+        refs: { eventId, calendarId, response, notified: notify },
+      };
+    },
+
+    /**
+     * Suggest meeting times: free/busy for you plus the attendees, then the first free
+     * slots of the requested length inside working hours. Read-only — nothing is booked.
+     */
+    suggestTime: async (params, account): Promise<HandlerResponse> => {
+      const durationMinutes = Number(params.durationMinutes ?? 30);
+      if (!Number.isFinite(durationMinutes) || durationMinutes <= 0 || durationMinutes > 24 * 60) {
+        throw new Error(`durationMinutes must be between 1 and 1440 — got '${String(params.durationMinutes)}'.`);
+      }
+      const now = Date.now();
+      const rangeStart = params.timeMin ? Date.parse(String(params.timeMin)) : now;
+      const rangeEnd = params.timeMax ? Date.parse(String(params.timeMax)) : rangeStart + 7 * 86_400_000;
+      if (Number.isNaN(rangeStart) || Number.isNaN(rangeEnd) || rangeEnd <= rangeStart) {
+        throw new Error('timeMin and timeMax must be ISO 8601 times with timeMax after timeMin.');
+      }
+      const workdayStart = Number(params.workdayStart ?? 9);
+      const workdayEnd = Number(params.workdayEnd ?? 17);
+      if (!(workdayStart >= 0 && workdayEnd <= 24 && workdayStart < workdayEnd)) {
+        throw new Error('workdayStart and workdayEnd are hours 0–24 with start before end.');
+      }
+
+      let timeZone = optionalString(params, 'timeZone');
+      if (!timeZone) {
+        const primary = await call('calendar', 'calendars.get', { calendarId: 'primary' }, { account }) as Record<string, unknown>;
+        timeZone = String(primary.timeZone ?? 'UTC');
+      }
+
+      const ids = [account, ...String(params.attendees ?? '').split(',').map((e) => e.trim()).filter(Boolean)];
+      const items = [...new Set(ids)].map((id) => ({ id }));
+      const data = await call('calendar', 'freebusy.query', {
+        timeMin: new Date(rangeStart).toISOString(), timeMax: new Date(rangeEnd).toISOString(), timeZone, items,
+      }, { account }) as { calendars?: Record<string, { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }> };
+
+      const busy: Interval[] = [];
+      const unknown: string[] = [];
+      for (const [id, cal] of Object.entries(data.calendars ?? {})) {
+        if (cal.errors?.length) unknown.push(id);
+        for (const b of cal.busy ?? []) busy.push({ start: Date.parse(b.start), end: Date.parse(b.end) });
+      }
+
+      const slots = suggestSlots({
+        busy, rangeStart, rangeEnd, durationMinutes, timeZone, workdayStart, workdayEnd,
+        includeWeekends: params.includeWeekends === true || params.includeWeekends === 'true',
+        maxSuggestions: Math.min(Math.max(Number(params.maxSuggestions ?? 5), 1), 20),
+      });
+
+      const header = `## Suggested times (${durationMinutes} min, ${timeZone}, ${workdayStart}:00–${workdayEnd}:00)`;
+      const caveat = unknown.length
+        ? `\n\n⚠ No free/busy access for ${unknown.join(', ')} — their calendars were NOT taken into account.`
+        : '';
+      const body = slots.length
+        ? slots.map((s, i) => `${i + 1}. ${formatSlot(s, timeZone!)}  (start ${new Date(s.start).toISOString()})`).join('\n')
+        : 'No common free slot in that range. Widen timeMin/timeMax, shorten the meeting, or include weekends.';
+      return {
+        text: `${header}\n\n${body}${caveat}`,
+        refs: {
+          timeZone,
+          slots: slots.map((s) => ({ start: new Date(s.start).toISOString(), end: new Date(s.end).toISOString() })),
+          ...(unknown.length ? { noAccess: unknown } : {}),
+        },
       };
     },
 

@@ -128,6 +128,11 @@ describe('readOnly', () => {
   beforeAll(() => configurePolicies([readOnly]));
   afterAll(() => configurePolicies([]));
 
+  it('allows suggestTime but blocks respond', async () => {
+    expect((await evaluatePolicies([], ctx('suggestTime'), 'calendar')).action).toBe('allow');
+    expect((await evaluatePolicies([], ctx('respond'), 'calendar')).action).toBe('block');
+  });
+
   it('allows getDraft but blocks updateDraft', async () => {
     expect((await evaluatePolicies([], ctx('getDraft'), 'gmail')).action).toBe('allow');
     expect((await evaluatePolicies([], ctx('updateDraft'), 'gmail')).action).toBe('block');
