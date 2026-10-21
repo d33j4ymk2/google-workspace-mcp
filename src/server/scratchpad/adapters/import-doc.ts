@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { call, download } from '../../../google/client.js';
-import { resolveWorkspacePath } from '../../../executor/workspace.js';
+import { resolveWorkspacePath, verifyPathSafety } from '../../../executor/workspace.js';
 import { ensureWorkspaceDir } from '../../../executor/workspace.js';
 import type { HandlerResponse } from '../../handler.js';
 import type { ScratchpadManager } from '../manager.js';
@@ -176,6 +176,7 @@ async function stripBase64Images(
     // Decode and write to workspace
     const buffer = Buffer.from(data.replace(/\s/g, ''), 'base64');
     const filePath = resolveWorkspacePath(filename);
+    await verifyPathSafety(filePath);
     await fs.writeFile(filePath, buffer);
 
     // Register in side-table — use returned refId to avoid mismatch

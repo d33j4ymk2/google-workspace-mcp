@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { validateWorkspaceDir, resolveWorkspacePath, getWorkspaceDir, checkWorkspaceStatus, sanitizePath } from '../../executor/workspace.js';
+import { validateWorkspaceDir, resolveWorkspacePath, getWorkspaceDir, checkWorkspaceStatus, sanitizePath, verifyPathSafety } from '../../executor/workspace.js';
+import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -171,5 +172,52 @@ describe('checkWorkspaceStatus', () => {
     const status = checkWorkspaceStatus();
     expect(status.valid).toBe(false);
     expect(status.warning).toContain('cannot be');
+  });
+});
+
+describe('verifyPathSafety', () => {
+  let root: string;
+  let saved: string | undefined;
+
+  beforeEach(async () => {
+    saved = process.env.WORKSPACE_DIR;
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'gws-verify-'));
+    await fs.mkdir(path.join(root, 'ws'));
+    await fs.mkdir(path.join(root, 'outside'));
+    process.env.WORKSPACE_DIR = path.join(root, 'ws');
+  });
+
+  afterEach(async () => {
+    if (saved === undefined) delete process.env.WORKSPACE_DIR;
+    else process.env.WORKSPACE_DIR = saved;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('accepts an existing file in a workspace reached through a symlink', async () => {
+    // On macOS os.tmpdir() is itself under a symlink (/var -> /private/var).
+    await fs.symlink(path.join(root, 'ws'), path.join(root, 'ws-link'));
+    process.env.WORKSPACE_DIR = path.join(root, 'ws-link');
+    await fs.writeFile(path.join(root, 'ws', 'a.txt'), 'x');
+    await expect(verifyPathSafety(resolveWorkspacePath('a.txt'))).resolves.toBeUndefined();
+  });
+
+  it('accepts a file that does not exist yet', async () => {
+    await expect(verifyPathSafety(resolveWorkspacePath('new/dir/b.txt'))).resolves.toBeUndefined();
+  });
+
+  it('rejects an existing file reached through a symlink that leaves the workspace', async () => {
+    await fs.writeFile(path.join(root, 'outside', 'secret.txt'), 'x');
+    await fs.symlink(path.join(root, 'outside', 'secret.txt'), path.join(root, 'ws', 'link.txt'));
+    await expect(verifyPathSafety(resolveWorkspacePath('link.txt'))).rejects.toThrow(/Symlink escape/);
+  });
+
+  it('rejects a new file under a symlinked directory that leaves the workspace', async () => {
+    await fs.symlink(path.join(root, 'outside'), path.join(root, 'ws', 'out'));
+    await expect(verifyPathSafety(resolveWorkspacePath('out/new.txt'))).rejects.toThrow(/Symlink escape/);
+  });
+
+  it('rejects a dangling symlink, which a write would follow', async () => {
+    await fs.symlink(path.join(root, 'outside', 'missing.txt'), path.join(root, 'ws', 'dangling.txt'));
+    await expect(verifyPathSafety(resolveWorkspacePath('dangling.txt'))).rejects.toThrow(/dangling/);
   });
 });

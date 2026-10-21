@@ -179,17 +179,45 @@ export function resolveWorkspacePath(filename: string): string {
  * Must be called before any fs operation on a workspace path.
  */
 export async function verifyPathSafety(filePath: string): Promise<void> {
-  const dir = path.resolve(getWorkspaceDir());
-  try {
-    const real = await fs.realpath(filePath);
-    if (!real.startsWith(dir + path.sep) && real !== dir) {
-      throw new Error(
-        `Symlink escape detected: "${filePath}" resolves to "${real}" outside workspace`,
-      );
+  // Both sides are compared as REAL paths. Resolving only the file made any workspace
+  // reached through a symlink look like an escape from itself — on macOS that is every
+  // path under /var or /tmp, which are links into /private.
+  const dir = await realpathOfNearest(path.resolve(getWorkspaceDir()));
+  const real = await realpathOfNearest(path.resolve(filePath));
+  if (!real.startsWith(dir + path.sep) && real !== dir) {
+    throw new Error(
+      `Symlink escape detected: "${filePath}" resolves to "${real}" outside workspace`,
+    );
+  }
+}
+
+/**
+ * Real path of `p`, or — when `p` does not exist yet (the write case) — the real path of
+ * its nearest existing ancestor with the missing tail re-attached.
+ *
+ * Checking the ancestor matters: a new file under a symlinked subdirectory
+ * (`workspace/link/new.txt`, `link -> /etc`) does not exist, and treating "does not
+ * exist" as safe would let the write land outside the workspace.
+ *
+ * A dangling symlink is refused outright. It does not resolve, so it looks missing, yet
+ * writing to it creates its target wherever that points.
+ */
+async function realpathOfNearest(p: string): Promise<string> {
+  const tail: string[] = [];
+  let current = p;
+  for (;;) {
+    try {
+      return path.join(await fs.realpath(current), ...tail);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
-  } catch (err) {
-    // ENOENT is OK — file doesn't exist yet (write case)
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
+    const exists = await fs.lstat(current).then(() => true, () => false);
+    if (exists) {
+      throw new Error(`Symlink escape detected: "${current}" is a dangling symlink`);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return path.join(current, ...tail);
+    tail.unshift(path.basename(current));
+    current = parent;
   }
 }

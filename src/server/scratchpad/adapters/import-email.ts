@@ -5,7 +5,7 @@
 
 import * as fs from 'node:fs/promises';
 import { call } from '../../../google/client.js';
-import { ensureWorkspaceDir, resolveWorkspacePath } from '../../../executor/workspace.js';
+import { ensureWorkspaceDir, resolveWorkspacePath, verifyPathSafety } from '../../../executor/workspace.js';
 import { extractBodyFromPayload, extractAttachments } from '../../formatting/markdown.js';
 import type { HandlerResponse } from '../../handler.js';
 import type { ScratchpadManager } from '../manager.js';
@@ -65,6 +65,7 @@ export async function importEmail(
             const shortId = scratchpadId.replace('sp-', '');
             const safeFilename = `${shortId}-${att.filename}`;
             const filePath = resolveWorkspacePath(safeFilename);
+            await verifyPathSafety(filePath);
             await fs.writeFile(filePath, buffer);
 
             // Register in scratchpad
