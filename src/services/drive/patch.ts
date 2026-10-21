@@ -20,6 +20,8 @@ import { requireString } from '../../server/handlers/validate.js';
 import { ensureWorkspaceDir, resolveWorkspacePath, verifyPathSafety } from '../../executor/workspace.js';
 import { isTextFile, formatFileOutput, buildImageBlock, buildImageBlockFromFile, isImageFile, type FileOutputResult } from '../../executor/file-output.js';
 import { downloadToWorkspace } from './workspace-download.js';
+import { readDriveContent } from './read-content.js';
+import { getActivePolicies } from '../../factory/safety.js';
 import type { ServicePatch } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -328,6 +330,31 @@ export const drivePatch: ServicePatch = {
           ...(output.content ? { content: output.content } : {}),
         },
         ...(output.imageBlock ? { content: [output.imageBlock] } : {}),
+      };
+    },
+
+    read: async (params, account): Promise<HandlerResponse> => {
+      const fileId = requireString(params, 'fileId');
+      const maxChars = Math.min(Math.max(Number(params.maxChars ?? 50_000), 1_000), 500_000);
+      const readOnly = getActivePolicies().some((p) => p.name === 'read-only');
+      const r = await readDriveContent(account, fileId, maxChars, !readOnly);
+
+      const how = {
+        export: 'exported from Google',
+        download: 'read as stored',
+        conversion: 'converted to text by Drive (a temporary copy was made and deleted)',
+      }[r.via];
+      const notes = [
+        r.truncated ? `⚠ Truncated: showing ${r.text.length} of ${r.totalChars} characters. Pass a larger maxChars, or download the file.` : '',
+        r.leftover ? `⚠ The temporary copy (file id ${r.leftover}) could not be deleted. Remove it from your Drive root.` : '',
+      ].filter(Boolean).join('\n');
+      return {
+        text: `## ${r.name}\n\n**Type:** ${r.mimeType}\n**Text:** ${how}\n${notes ? `${notes}\n` : ''}\n${r.text}`,
+        refs: {
+          fileId, name: r.name, mimeType: r.mimeType, via: r.via,
+          chars: r.text.length, totalChars: r.totalChars, truncated: r.truncated,
+          ...(r.leftover ? { leftoverCopyId: r.leftover } : {}),
+        },
       };
     },
 

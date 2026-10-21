@@ -68,6 +68,21 @@ operations:
     defaults:
       supportsAllDrives: true
 
+  read:
+    type: detail
+    description: "read a file's TEXT inline: Google Docs/Sheets (first sheet, as CSV)/Slides, plain-text files, and PDFs, Word, Excel, PowerPoint and images (Drive converts those, with OCR for scans, via a temporary copy in your Drive root that is deleted straight after). Use download for the original bytes."
+    resource: files.get
+    params:
+      fileId:
+        type: string
+        description: "File ID"
+        required: true
+      maxChars:
+        type: number
+        description: "Most characters to return (default 50000, max 500000)"
+    defaults:
+      supportsAllDrives: true
+
   download:
     type: detail
     description: "download file content to local path"
