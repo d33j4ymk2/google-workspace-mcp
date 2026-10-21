@@ -334,7 +334,9 @@ function buildAuthUrl(
     response_type: 'code',
     scope: scopes.join(' '),
     access_type: 'offline',
-    prompt: 'consent',
+    // select_account: always show the account chooser, so adding a second account
+    // never silently re-authorizes whichever one the browser is signed in to first.
+    prompt: 'select_account consent',
     state,
   });
   return `${GOOGLE_AUTH_URL}?${params.toString()}`;
