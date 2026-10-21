@@ -547,13 +547,13 @@
           "status": "gap"
         },
         "users.drafts.update": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.drafts.create": {
           "status": "gap"
         },
         "users.drafts.get": {
-          "status": "gap"
+          "status": "covered"
         },
         "users.drafts.delete": {
           "status": "covered"

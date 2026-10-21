@@ -136,3 +136,144 @@ describe('deleteDraft custom handler', () => {
     expect(mockCall).not.toHaveBeenCalled();
   });
 });
+
+// --- getDraft / updateDraft ------------------------------------------------
+
+import { mockUpload } from '../../server/handlers/__mocks__/client.js';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
+const b64 = (s: string) => Buffer.from(s, 'utf-8').toString('base64url');
+
+/** A reply draft as users.drafts.get (format=full) returns it: body + one PDF. */
+function fullDraft(opts: { html?: boolean } = {}): Record<string, unknown> {
+  const bodyPart = opts.html
+    ? { mimeType: 'text/html', filename: '', body: { data: b64('<p>Hi <b>Bob</b></p>') } }
+    : { mimeType: 'text/plain', filename: '', body: { data: b64('Hi Bob,\nsee attached.') } };
+  return {
+    id: 'r-777',
+    message: {
+      id: 'm-777',
+      threadId: 't-thread',
+      payload: {
+        mimeType: 'multipart/mixed',
+        headers: [
+          { name: 'From', value: 'Me <alias@test.com>' },
+          { name: 'To', value: 'bob@test.com' },
+          { name: 'Cc', value: 'carol@test.com' },
+          { name: 'Subject', value: 'Re: Invoice' },
+          { name: 'In-Reply-To', value: '<orig@mail.test>' },
+          { name: 'References', value: '<root@mail.test> <orig@mail.test>' },
+        ],
+        parts: [
+          bodyPart,
+          { mimeType: 'application/pdf', filename: 'invoice.pdf', headers: [], body: { attachmentId: 'att-1', size: 3 } },
+        ],
+      },
+    },
+  };
+}
+
+/** The RFC 822 message handed to the Nth upload. */
+const uploaded = (n = 0) => (mockUpload.mock.calls[n][3].media as Buffer).toString('utf-8');
+
+describe('updateDraft', () => {
+  const handler = gmailPatch.customHandlers!.updateDraft;
+
+  beforeEach(() => {
+    mockUpload.mockReset();
+    mockUpload.mockResolvedValue({ id: 'r-777', message: { id: 'm-778', threadId: 't-thread' } });
+  });
+
+  function mockDraftReads(draft = fullDraft()) {
+    mockCall.mockImplementation(async (_svc, method) => {
+      if (method === 'users.drafts.get') return draft;
+      if (method === 'users.messages.attachments.get') return { data: Buffer.from('PDF').toString('base64url') };
+      // The file-level beforeEach returns mockCall from mockReset(), and vitest calls
+      // a hook's return value as its cleanup: that arrives here with no arguments.
+      if (method === undefined) return undefined;
+      throw new Error(`unexpected ${String(method)}`);
+    });
+  }
+
+  it('changes only the subject and keeps everything else, in the same draft and thread', async () => {
+    mockDraftReads();
+    const res = await handler({ draftId: 'r-777', subject: 'Re: Invoice (corrected)' }, 'me@test.com');
+
+    expect(mockUpload).toHaveBeenCalledWith('gmail', 'users.drafts.update',
+      { userId: 'me', id: 'r-777' },
+      expect.objectContaining({ account: 'me@test.com', metadata: { id: 'r-777', message: { threadId: 't-thread' } } }));
+
+    const mime = uploaded();
+    expect(mime).toContain('Subject: Re: Invoice (corrected)');
+    expect(mime).toContain('To: bob@test.com');
+    expect(mime).toContain('Cc: carol@test.com');
+    expect(mime).toContain('alias@test.com');                       // Send-As alias kept
+    expect(mime).toContain('In-Reply-To: <orig@mail.test>');         // still a reply
+    expect(mime).toContain('References: <root@mail.test> <orig@mail.test>');
+    expect(mime).toContain(Buffer.from('Hi Bob,\nsee attached.').toString('base64'));
+    expect(mime).toContain('filename="invoice.pdf"');                // attachment re-uploaded
+    expect(mime).toContain(Buffer.from('PDF').toString('base64'));
+    expect(res.text).toContain('not sent');
+    expect(res.refs.draftId).toBe('r-777');
+  });
+
+  it('replaces the body when one is given', async () => {
+    mockDraftReads();
+    await handler({ draftId: 'r-777', body: 'New text' }, 'me@test.com');
+    const mime = uploaded();
+    expect(mime).toContain(Buffer.from('New text').toString('base64'));
+    expect(mime).not.toContain(Buffer.from('Hi Bob,\nsee attached.').toString('base64'));
+  });
+
+  it('keeps an HTML body as HTML when the body is not touched', async () => {
+    mockDraftReads(fullDraft({ html: true }));
+    await handler({ draftId: 'r-777', to: 'dave@test.com' }, 'me@test.com');
+    const mime = uploaded();
+    expect(mime).toContain('Content-Type: text/html');
+    expect(mime).toContain(Buffer.from('<p>Hi <b>Bob</b></p>').toString('base64'));
+    expect(mime).toContain('To: dave@test.com');
+  });
+
+  it('removes a named attachment and refuses a name the draft does not have', async () => {
+    mockDraftReads();
+    await handler({ draftId: 'r-777', removeAttachments: 'Invoice.PDF' }, 'me@test.com');
+    expect(uploaded()).not.toContain('invoice.pdf');
+
+    await expect(handler({ draftId: 'r-777', removeAttachments: 'nope.txt' }, 'me@test.com'))
+      .rejects.toThrow(/no attachment named "nope.txt".*invoice\.pdf/);
+    expect(mockUpload).toHaveBeenCalledTimes(1);                      // the bad call uploaded nothing
+  });
+
+  it('adds a workspace file alongside the existing attachment', async () => {
+    const saved = process.env.WORKSPACE_DIR;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gws-draft-'));
+    process.env.WORKSPACE_DIR = dir;
+    try {
+      await fs.writeFile(path.join(dir, 'notes.txt'), 'extra');
+      mockDraftReads();
+      const res = await handler({ draftId: 'r-777', attachments: 'notes.txt' }, 'me@test.com');
+      const mime = uploaded();
+      expect(mime).toContain('filename="invoice.pdf"');
+      expect(mime).toContain('filename="notes.txt"');
+      expect(res.refs.attachments).toEqual(['invoice.pdf', 'notes.txt']);
+    } finally {
+      if (saved === undefined) delete process.env.WORKSPACE_DIR; else process.env.WORKSPACE_DIR = saved;
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('getDraft', () => {
+  it('shows the draft id with the message content', async () => {
+    mockCall.mockResolvedValueOnce(fullDraft());
+    const res = await gmailPatch.customHandlers!.getDraft({ draftId: 'r-777' }, 'me@test.com');
+    expect(mockCall).toHaveBeenCalledWith('gmail', 'users.drafts.get',
+      { userId: 'me', id: 'r-777', format: 'full' }, expect.objectContaining({ account: 'me@test.com' }));
+    expect(res.text).toContain('**Draft ID:** r-777');
+    expect(res.text).toContain('Re: Invoice');
+    expect(res.text).toContain('see attached');
+    expect(res.refs.draftId).toBe('r-777');
+  });
+});

@@ -44,6 +44,12 @@ describe('draftOnlyEmail', () => {
     }
   });
 
+  it('allows reading and editing drafts, which never send', async () => {
+    for (const operation of ['getDraft', 'updateDraft', 'listDrafts']) {
+      expect((await evaluatePolicies([], ctx(operation), 'gmail')).action, operation).toBe('allow');
+    }
+  });
+
   it('still blocks when draft is anything other than true or "true"', async () => {
     for (const operation of ['send', 'reply', 'replyAll', 'forward']) {
       for (const draft of [false, 'false', 'TRUE', 'yes', 1, '1', '']) {
@@ -121,6 +127,11 @@ describe('noDelete', () => {
 describe('readOnly', () => {
   beforeAll(() => configurePolicies([readOnly]));
   afterAll(() => configurePolicies([]));
+
+  it('allows getDraft but blocks updateDraft', async () => {
+    expect((await evaluatePolicies([], ctx('getDraft'), 'gmail')).action).toBe('allow');
+    expect((await evaluatePolicies([], ctx('updateDraft'), 'gmail')).action).toBe('block');
+  });
 
   it('allows search', async () => {
     expect((await evaluatePolicies([], ctx('search'), 'gmail')).action).toBe('allow');

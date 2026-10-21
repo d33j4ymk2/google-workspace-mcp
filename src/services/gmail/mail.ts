@@ -355,3 +355,140 @@ export async function forwardMail(account: string, opts: ForwardOptions): Promis
 
   return deliver(message, account, opts.draft === true, original.threadId);
 }
+
+// --- Draft editing ---------------------------------------------------------
+
+export interface UpdateDraftOptions {
+  draftId: string;
+  to?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  /** Replaces the whole body. Omit to keep the current one. */
+  body?: string;
+  /** Only meaningful with `body`: whether the new body is HTML. */
+  html?: boolean;
+  /** Workspace filenames to ADD to the attachments already on the draft. */
+  attachments?: string[];
+  /** Filenames of current attachments to drop. */
+  removeAttachments?: string[];
+}
+
+/** First non-attachment part of a given type, raw (not sanitized): the body as stored. */
+function rawBodyPart(part: Record<string, unknown>, mimeType: string): string | undefined {
+  const body = part.body as { data?: string; attachmentId?: string } | undefined;
+  if (part.mimeType === mimeType && !part.filename && body?.data) {
+    return Buffer.from(body.data, 'base64url').toString('utf-8');
+  }
+  for (const p of (part.parts ?? []) as Array<Record<string, unknown>>) {
+    const found = rawBodyPart(p, mimeType);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Rewrite a saved draft in place.
+ *
+ * Gmail has no partial update: drafts.update REPLACES the draft's message. So every
+ * field the caller did not name is read back from the current draft and written again —
+ * recipients, subject, body, From (a Send-As alias survives), the threading headers and
+ * threadId (a reply draft stays a reply in its thread), and the existing attachments,
+ * re-uploaded byte-for-byte. The draft id does not change.
+ */
+export async function updateDraft(account: string, opts: UpdateDraftOptions): Promise<Record<string, unknown>> {
+  const draft = await call('gmail', 'users.drafts.get',
+    { userId: 'me', id: opts.draftId, format: 'full' }, { account }) as Record<string, unknown>;
+  const message = (draft.message ?? {}) as Record<string, unknown>;
+  const payload = (message.payload ?? {}) as Record<string, unknown>;
+  const headers = (payload.headers ?? []) as Array<{ name: string; value: string }>;
+  const header = (name: string) => headerOf(headers, name) || undefined;
+
+  let body = opts.body;
+  let html = opts.html === true;
+  if (body === undefined) {
+    const existingHtml = rawBodyPart(payload, 'text/html');
+    html = existingHtml !== undefined;
+    body = existingHtml ?? rawBodyPart(payload, 'text/plain') ?? '';
+  }
+
+  // Current attachments, minus the ones asked to go. Inline images keep their
+  // Content-ID so the HTML body's cid: references still resolve.
+  const drop = new Set((opts.removeAttachments ?? []).map((n) => n.trim().toLowerCase()));
+  const kept: Array<{ filename: string; contentType: string; attachmentId: string; contentId?: string }> = [];
+  const seen = new Set<string>();
+  const walk = (part: Record<string, unknown>) => {
+    const partBody = part.body as { attachmentId?: string } | undefined;
+    if (part.filename && partBody?.attachmentId) {
+      const filename = String(part.filename);
+      seen.add(filename.toLowerCase());
+      if (!drop.has(filename.toLowerCase())) {
+        const partHeaders = (part.headers ?? []) as Array<{ name: string; value: string }>;
+        const cid = headerOf(partHeaders, 'Content-ID').replace(/^<|>$/g, '');
+        kept.push({
+          filename,
+          contentType: String(part.mimeType ?? 'application/octet-stream'),
+          attachmentId: partBody.attachmentId,
+          ...(cid ? { contentId: cid } : {}),
+        });
+      }
+    }
+    for (const p of (part.parts ?? []) as Array<Record<string, unknown>>) walk(p);
+  };
+  walk(payload);
+
+  const missing = [...drop].filter((n) => !seen.has(n));
+  if (missing.length > 0) {
+    throw new Error(
+      `Draft ${opts.draftId} has no attachment named ${missing.map((n) => `"${n}"`).join(', ')}. ` +
+      `Current attachments: ${[...seen].join(', ') || 'none'}.`,
+    );
+  }
+
+  const existing: MimeAttachment[] = await Promise.all(kept.map(async (k) => {
+    const att = await call('gmail', 'users.messages.attachments.get',
+      { userId: 'me', messageId: String(message.id), id: k.attachmentId }, { account }) as { data: string };
+    return {
+      filename: k.filename,
+      contentType: k.contentType,
+      data: Buffer.from(att.data, 'base64url'),
+      ...(k.contentId ? { contentId: k.contentId } : {}),
+    };
+  }));
+  const added = opts.attachments?.length ? await loadAttachments(opts.attachments) : [];
+
+  const to = opts.to ?? header('To') ?? '';
+  const mime = buildMimeMessage({
+    to,
+    cc: opts.cc ?? header('Cc'),
+    bcc: opts.bcc ?? header('Bcc'),
+    from: header('From'),
+    subject: opts.subject ?? header('Subject') ?? '',
+    body,
+    html,
+    attachments: [...existing, ...added],
+    inReplyTo: header('In-Reply-To'),
+    references: header('References'),
+  });
+
+  const threadId = message.threadId ? String(message.threadId) : undefined;
+  const data = await upload('gmail', 'users.drafts.update', { userId: 'me', id: opts.draftId }, {
+    account,
+    media: mime,
+    contentType: 'message/rfc822',
+    metadata: { id: opts.draftId, ...(threadId ? { message: { threadId } } : {}) },
+  }) as Record<string, unknown>;
+
+  if (typeof data?.id !== 'string' || data.id === '') {
+    throw new Error(
+      `Gmail accepted the draft update but returned no draft id, so whether draft ` +
+      `${opts.draftId} was changed cannot be confirmed. Check it with getDraft before retrying.`,
+    );
+  }
+  return {
+    ...data,
+    to,
+    subject: opts.subject ?? header('Subject') ?? '',
+    attachments: [...existing, ...added].map((a) => a.filename),
+  };
+}

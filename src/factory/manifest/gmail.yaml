@@ -250,6 +250,61 @@ operations:
     defaults:
       userId: me
 
+  getDraft:
+    type: detail
+    description: "read one saved draft in full — recipients, subject, body and attachments — by its draft id (the r… id from listDrafts). Read a draft before updateDraft to see what it currently says."
+    resource: users.drafts.get
+    params:
+      draftId:
+        type: string
+        description: "Draft id as returned by listDrafts (an r… id, not the message id)"
+        required: true
+        maps_to: id
+      bodyFormat:
+        type: string
+        description: "How to render the message body. 'plain' (default) returns text/plain or a crude HTML-strip fallback. 'html' returns the text/html part sanitized — useful when the plain-text part is empty/stub."
+        enum: [plain, html]
+        default: plain
+        client_only: true
+    defaults:
+      userId: me
+
+  updateDraft:
+    type: action
+    description: "edit a saved draft in place, keeping its draft id. Only the fields you pass change; everything else — recipients, subject, body, sender alias, thread and existing attachments — is kept. `body` replaces the whole body, so read the draft with getDraft first and pass the full new text. to, cc, bcc and subject each REPLACE that line; `attachments` ADDS workspace files to the ones already there; removeAttachments drops current ones by filename. Never sends."
+    resource: users.drafts.update
+    params:
+      draftId:
+        type: string
+        description: "Draft id as returned by listDrafts (an r… id, not the message id)"
+        required: true
+      to:
+        type: string
+        description: "Recipient email(s), comma-separated"
+      cc:
+        type: string
+        description: "CC email(s), comma-separated. On `replyAll` these are ADDITIONAL — they do not replace the recipients already on the thread."
+      bcc:
+        type: string
+        description: "BCC email(s), comma-separated"
+      subject:
+        type: string
+        description: "Email subject line"
+      body:
+        type: string
+        description: "Email body text. On `forward`, an optional note prepended ABOVE the forwarded message."
+      html:
+        type: boolean
+        description: "Treat body as HTML content (default: plain text)"
+      attachments:
+        type: string
+        description: "Workspace filenames to attach, comma-separated (files must exist in workspace via manage_workspace). Creates draft when present."
+      removeAttachments:
+        type: string
+        description: "Filenames of current attachments to remove, comma-separated, exactly as getDraft lists them"
+    defaults:
+      userId: me
+
   deleteDraft:
     type: action
     description: "permanently delete a draft (unsent message) by its draft id (the r… id returned by listDrafts). Irreversible — the draft is discarded, not moved to trash."

@@ -21,7 +21,7 @@ import {
   handleCreateFilter, handleUpdateFilter, handleDeleteFilter,
 } from './filters.js';
 import { handlePreviewModifyMatching, handleModifyMatching } from './modify-matching.js';
-import { sendMail, replyMail, forwardMail } from './mail.js';
+import { sendMail, replyMail, forwardMail, updateDraft } from './mail.js';
 import type { ServicePatch, PatchContext } from '../../factory/types.js';
 import type { HandlerResponse } from '../../server/formatting/markdown.js';
 
@@ -521,6 +521,42 @@ export const gmailPatch: ServicePatch = {
      * it does not recycle them through the trash, so the confirmation says
      * "deleted" and there is deliberately no untrash step offered after it.
      */
+    /** Read one draft. The message inside it formats exactly like `read`, headed by the draft id. */
+    getDraft: async (params, account): Promise<HandlerResponse> => {
+      const draftId = requireString(params, 'draftId');
+      const draft = await call('gmail', 'users.drafts.get',
+        { userId: 'me', id: draftId, format: 'full' }, { account }) as Record<string, unknown>;
+      const bodyFormat = (params.bodyFormat as EmailBodyFormat | undefined) ?? 'plain';
+      const detail = formatEmailDetail(draft.message, { bodyFormat });
+      return {
+        text: `**Draft ID:** ${draftId}\n\n${detail.text}`,
+        refs: { ...detail.refs, draftId },
+      };
+    },
+
+    updateDraft: async (params, account): Promise<HandlerResponse> => {
+      const draftId = requireString(params, 'draftId');
+      const list = (v: unknown) => v ? String(v).split(',').map(s => s.trim()).filter(Boolean) : [];
+      const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
+      const data = await updateDraft(account, {
+        draftId,
+        to: str(params.to),
+        cc: str(params.cc),
+        bcc: str(params.bcc),
+        subject: str(params.subject),
+        body: str(params.body),
+        html: params.html === true || params.html === 'true',
+        attachments: list(params.attachments),
+        removeAttachments: list(params.removeAttachments),
+      });
+      const attachments = data.attachments as string[];
+      return {
+        text: `Draft **${draftId}** updated (not sent).\n\n**To:** ${String(data.to)}\n**Subject:** ${String(data.subject)}` +
+          (attachments.length ? `\n**Attachments:** ${attachments.join(', ')}` : ''),
+        refs: { draftId, id: data.id, to: data.to, subject: data.subject, attachments, isDraft: true },
+      };
+    },
+
     deleteDraft: async (params, account): Promise<HandlerResponse> => {
       const draftId = requireString(params, 'draftId');
       await call('gmail', 'users.drafts.delete', {
