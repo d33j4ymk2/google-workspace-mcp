@@ -99,11 +99,17 @@ export const draftOnlyEmail: SafetyPolicy = {
   applies: (service) => service === 'gmail',
   evaluate: (_args, ctx) => {
     const blocked = ['send', 'reply', 'replyAll', 'forward'];
-    if (blocked.includes(ctx.operation)) {
+    // Each of these saves a draft instead of sending when `draft` is set, and a draft
+    // sends nothing. The test must match the handlers' own reading of the flag in
+    // services/gmail/patch.ts exactly: anything looser here would let a call through
+    // as a "draft" that the handler then sends.
+    const isDraft = ctx.params.draft === true || ctx.params.draft === 'true';
+    if (blocked.includes(ctx.operation) && !isDraft) {
       return {
         action: 'block',
         reason: `Operation '${ctx.operation}' is blocked by draft-only email policy. ` +
-          `The agent can read, search, and triage emails but cannot send on behalf of the user.`,
+          `The agent can read, search, and triage emails but cannot send on behalf of the user. ` +
+          `Pass draft: true to save it as a draft instead.`,
       };
     }
     // A filter that forwards sends every future match, with nobody in the loop for any of

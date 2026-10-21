@@ -35,6 +35,24 @@ describe('draftOnlyEmail', () => {
     expect((await evaluatePolicies([], ctx('forward'), 'gmail')).action).toBe('block');
   });
 
+  it('allows send, reply, replyAll and forward saved as a draft', async () => {
+    for (const operation of ['send', 'reply', 'replyAll', 'forward']) {
+      for (const draft of [true, 'true']) {
+        const result = await evaluatePolicies([], { operation, params: { draft }, account: 'test@test.com' }, 'gmail');
+        expect(result.action, `${operation} draft=${String(draft)}`).toBe('allow');
+      }
+    }
+  });
+
+  it('still blocks when draft is anything other than true or "true"', async () => {
+    for (const operation of ['send', 'reply', 'replyAll', 'forward']) {
+      for (const draft of [false, 'false', 'TRUE', 'yes', 1, '1', '']) {
+        const result = await evaluatePolicies([], { operation, params: { draft }, account: 'test@test.com' }, 'gmail');
+        expect(result.action, `${operation} draft=${JSON.stringify(draft)}`).toBe('block');
+      }
+    }
+  });
+
   it('allows search', async () => {
     expect((await evaluatePolicies([], ctx('search'), 'gmail')).action).toBe('allow');
   });
