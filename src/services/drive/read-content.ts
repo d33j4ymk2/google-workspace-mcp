@@ -137,7 +137,7 @@ export async function readDriveContent(
   }
 
   // Exports start with a byte-order mark; it is not content.
-  text = text.replace(/^﻿/, '');
+  text = text.replace(/^\uFEFF/, '');
   const totalChars = text.length;
   const truncated = totalChars > maxChars;
   return {
